@@ -13,14 +13,29 @@ Ship a **Claude Code–class coding agent** that can call **any enterprise LLM t
 
 | Tier | Examples | Credits / cost | Default use |
 |------|----------|----------------|-------------|
-| **Heavy teacher** | Claude Opus/Sonnet, GPT-4/5-class, Kimi large, etc. | **Burn credits fast** | Complex multi-file reasoning, hard debug, teacher labels, hard-negative synthesis |
-| **Mid commercial** | Smaller API models the org licenses | Medium | Medium tasks when wasmai not ready yet |
-| **Org small (wasmai CPU)** | Qwen2.5-Coder-3B Q4, self-hosted | **Cheapest** (self-host or tiny credits) | High-volume simple completions — default path once good enough |
-| **Org large (wasmai GPU)** | 7B–70B Q4 self-hosted | Medium infra cost, **no API credits** | Escalation when small org model is low-confidence |
+| **Org small (wasmai CPU)** | Qwen2.5-Coder-3B Q4, self-hosted | **Cheapest** | **Always try first** — high-volume path |
+| **Org large (wasmai GPU)** | 7B–70B Q4 self-hosted | Infra only, **no API credits** | **Kicks in** when CPU is not good enough |
+| **Mid commercial** | Smaller API models the org licenses | Medium | Optional step before frontier |
+| **Frontier / enterprise** | Claude, OpenAI, Kimi large, etc. | **Burn credits fast** | **Last resort** when GPU is not good enough; primary **teacher** for hard cases |
 
-- Prefer **small org models** for volume; escalate only when complexity/confidence demands it.
-- **Every session is captured** regardless of which provider answered — enterprise APIs are **teachers + telemetry sources**, not permanent exclusive runtimes.
-- Goal: **shrink share of heavy-API spend** while quality on corporate vernacular holds or improves.
+#### Escalation cascade (router — required behavior)
+
+```
+Request
+  → 1. wasmai CPU (org-small)
+       pass confidence/quality? → return answer
+  → 2. wasmai GPU (org-large)   # CPU not good enough
+       pass? → return answer
+  → 3. Frontier / enterprise API  # GPU not good enough
+       → return answer
+  → ALWAYS: redact + enqueue full cascade transcript for next training schedule
+```
+
+- **“Not good enough”** = low confidence (e.g. top-1 / entropy &lt; 0.6), failed quality gate, user rejection, or pre-route complexity score above tier capacity.
+- Persist **weaker-tier outputs as rejected** and **winning tier (often frontier) as chosen** for DPO/ORPO.
+- Goal of the train loop: hard cases that needed GPU/frontier become solvable on **cheaper tiers next cycle**.
+- **Every session is captured** regardless of which provider finally answered.
+- Goal: **shrink share of frontier spend** while quality on corporate vernacular holds or improves.
 
 ### Runtime (inference)
 
@@ -49,21 +64,19 @@ Agent Harness (native Rust preferred)
   · project memory + context compaction
   · session telemetry (provider, model id, tokens, $ / credits)
         ↓
-Router + Redaction Gateway  ← ALL traffic (every provider)
-  · credit-aware: default cheap tier; escalate only if needed
-  · providers: Claude | OpenAI | Kimi | … | wasmai-cpu | wasmai-gpu
+Router + Redaction Gateway  ← ALL traffic
+  · cascade: CPU → GPU → frontier (stop when good enough)
   · PII/secret redaction on I/O + training harvest
+  · escalate? → save full conversation for next train schedule
         ↓
-  ┌─────────────────────┬──────────────────────────┐
-  Enterprise API teachers    WasmEdge org models
-  (high credit burn)         (MODEL_PATH, N_GPU_LAYERS)
-  └─────────────────────┴──────────────────────────┘
-              │ all sessions (redacted)
+  wasmai-cpu  →  wasmai-gpu  →  Claude/OpenAI/Kimi/…
+  (cheap)        (no API $)      (teacher / last resort)
+              │ all sessions + cascade pairs (redacted)
               ▼
 Continual Learning Pipeline (offline, scheduled)
-  · multi-provider corpus → DPO/ORPO + FIM hard negatives
-  · distill enterprise teacher behavior into org GGUF/adapters
-  · eval gates → promote → lower default API share
+  · CPU/GPU fails + frontier wins → DPO chosen/rejected
+  · multi-provider corpus + FIM hard negatives
+  · eval gates → promote org models → fewer escalations
 ```
 
 ---
@@ -100,9 +113,11 @@ Continual Learning Pipeline (offline, scheduled)
 - [ ] Harness talks to a **single provider abstraction** — Anthropic, OpenAI, Moonshot/Kimi, others, and wasmai — without rewriting tools/prompts.
 - [ ] **Capture 100% of sessions** that go through the gateway (every provider, every model id), subject to legal/opt-in policy.
 - [ ] Record per turn: `provider`, `model_id`, **input/output tokens**, **estimated credits / $**, latency, route reason.
-- [ ] Router is **credit-aware by default**: try org-small / cheap tier first; escalate to mid/heavy only on complexity, low confidence, or explicit user/mode override.
-- [ ] Heavy enterprise models are **teachers and safety nets**, not the permanent default for 80% simple workload.
-- [ ] Org models are the **training targets** of the continual pipeline; API traffic is the **corpus source**.
+- [ ] Router implements the **CPU → GPU → frontier cascade**; stop at first good-enough answer.
+- [ ] Escalate only on complexity, low confidence, quality fail, or explicit user/mode override — never start at frontier by default.
+- [ ] **Every escalation** (CPU→GPU and/or GPU→frontier) persists the full conversation into the training queue for the **next scheduled FT**.
+- [ ] Frontier/enterprise models are **teachers and safety nets**, not the permanent default for 80% simple workload.
+- [ ] Org models are the **training targets**; cascade rescues are the highest-value **corpus source**.
 
 ### Data & learning security
 
@@ -321,11 +336,13 @@ Every gateway session is training fuel for **org models**, whether the answer ca
 | Sub-agent manager | Hierarchical delegation graph, isolated contexts |
 | MCP tools | External tool I/O (redact payloads aggressively) |
 | TodoWrite lifecycle | Temporal QA gates (pending / in_progress / completed) |
-| Route decision | Why cheap vs heavy was chosen (complexity, confidence, override) |
+| Route / cascade | Tier tried, pass/fail, why escalated |
+| Cascade pairs | Weaker-tier draft = rejected; winning tier = chosen (for next FT) |
 | Implicit IDE signals (later) | Accept / edit / reject / backspace on completions |
 
-- [ ] Define `TelemetryEvent` schema (versioned) including `provider`, `model_id`, `token_in/out`, `credit_cost`
-- [ ] Correlation IDs: session → turn → tool_use → sub-agent
+- [ ] Define `TelemetryEvent` schema (versioned) including `provider`, `model_id`, `token_in/out`, `credit_cost`, `cascade_step`
+- [ ] Correlation IDs: session → turn → tool_use → sub-agent → cascade attempt
+- [ ] **Escalation flag** marks transcript for priority inclusion in next training schedule
 - [ ] **No provider-private silos**: one corpus stream for the org
 - [ ] Never log raw secrets; redact at write time or only write via gateway
 - [ ] Legal/policy: enterprise ToS + employee notice for training-on-usage where required
@@ -431,11 +448,14 @@ Corpus includes sessions that used **Claude, OpenAI, Kimi, wasmai, …** — tea
 | Immediate delete / ignore / aggressive backspace | **rejected** |
 | Agent: tests green + human keeps edits | **chosen** |
 | Agent: human reverts / rewrites heavily | **rejected** |
-| Heavy-API answer kept + small-model earlier attempt rejected | **chosen** = heavy, **rejected** = small (distill escalate path) |
+| Cascade: CPU fail → GPU win | **chosen** = GPU, **rejected** = CPU |
+| Cascade: GPU fail → frontier win | **chosen** = frontier, **rejected** = CPU and/or GPU drafts |
+| Cascade: all three tried, frontier kept | Multi-reject rows or ranked prefs; frontier = gold teacher |
 
 - [ ] Emit keystroke/completion outcome events (IDE extension or CLI post-hoc)
-- [ ] Join with redacted context windows → DPO/ORPO JSON (`prompt`, `chosen`, `rejected`, `source_provider`)
-- [ ] Optional: distill **successful heavy-API trajectories** as SFT gold for org-large
+- [ ] Join with redacted context windows → DPO/ORPO JSON (`prompt`, `chosen`, `rejected`, `source_provider`, `cascade_path`)
+- [ ] **Priority queue:** escalated conversations (any step-up) enter the **next training schedule** by default
+- [ ] Distill **successful frontier trajectories** as SFT gold for org-large (and hard subsets for org-small)
 - [ ] Quality filters: length, language, AST validity, near-dup
 - [ ] Gate: **≥ 500** high-quality pairs + defined eval metric before first schedule
 
@@ -522,46 +542,61 @@ Recommended default for enterprise schedule (research synthesis):
 
 ---
 
-## Phase 5 — Credit-aware router, confidence, escalation
+## Phase 5 — Router cascade: CPU → GPU → frontier
 
-**Goal:** Minimize credits while holding quality — small models first, heavy models sparingly.
+**Goal:** Serve with the cheapest tier that is good enough; every step-up becomes training fuel.
 
-### 5.0 Routing policy (credit ladder)
+### 5.0 Cascade policy (required)
 
-Default ladder (cheapest first):
+```
+1. wasmai-cpu     → if good enough → DONE
+2. wasmai-gpu     → if good enough → DONE   # GPU kicks in when CPU is not
+3. frontier/enterprise (Claude, OpenAI, Kimi, …) → DONE
+4. Persist full cascade conversation → next training schedule
+```
 
-1. **wasmai-cpu** (org-small) — burn almost no enterprise credits  
-2. **wasmai-gpu** (org-large) — infra cost only  
-3. **Mid commercial API** (if licensed)  
-4. **Heavy enterprise API** (Claude / OpenAI / Kimi top tier) — last resort / teacher
-
-- [ ] Org config: price table (credits per 1K tokens per model) + monthly budget caps
-- [ ] Hard caps: stop or queue heavy tier if budget exhausted (fail open to wasmai or fail closed per policy)
-- [ ] User/mode overrides: `Plan`/`Ask` may force stronger model; `Auto` stays ladder-default
-- [ ] Log `route_reason` for every decision (complexity | confidence | override | budget)
+- [ ] Implement sequential cascade (not only “pick one tier up front”)
+- [ ] Optional **pre-route skip**: high complexity score may start at GPU (never start at frontier by default unless policy override)
+- [ ] Optional mid commercial step between GPU and frontier if licensed
+- [ ] Org config: price table + monthly budget caps for frontier
+- [ ] Hard caps: stop/queue frontier if budget exhausted (fail open to wasmai-gpu or fail closed per policy)
+- [ ] User/mode overrides: `Plan`/`Ask` may force stronger model; `Auto` uses cascade
+- [ ] Log `route_reason` + `cascade_path` (e.g. `cpu→gpu→frontier`)
 
 ### 5.1 Complexity classifier (&lt; 10 ms)
 
 - [ ] Score = f(token count, AST depth/node count, keyword weights)
   - keywords e.g. `refactor`, `debug`, `optimize` weighted higher; simple `complete` lower
 - [ ] tree-sitter (Python/JS) in Rust sidecar optional but preferred
-- [ ] Threshold maps to **ladder step**, not only CPU vs GPU
+- [ ] Influences starting tier or early escalate threshold — still records cascade for training
 - [ ] Mock first (Flask/Python) then production Rust (Tokio/axum)
 
-### 5.2 Confidence escalation
+### 5.2 “Not good enough” → next tier
 
-- [ ] If org-small confidence &lt; **0.6** → escalate one step up the ladder (org-large, then heavy API)
-- [ ] Prefer **org-large before heavy API** when both available (save credits)
-- [ ] Circuit breaker / max escalate rate / max heavy-API QPS
-- [ ] Metrics: escalation %, accuracy lift, **credits saved vs always-heavy**, added latency
-- [ ] Optional: small MLP on prompt embeddings for preemptive step-up
+- [ ] If **CPU** confidence &lt; **0.6** (or quality gate fail) → **GPU kicks in**, re-run
+- [ ] If **GPU** confidence &lt; threshold or quality fail → **frontier/enterprise** called
+- [ ] Return the first accepted answer to the user; keep lower-tier drafts for training only
+- [ ] Circuit breaker / max escalate rate / max frontier QPS
+- [ ] Metrics: CPU-only %, CPU→GPU %, GPU→frontier %, credits saved, added latency
+- [ ] Optional: small MLP on prompt embeddings for preemptive start-at-GPU
 
-### 5.3 Ops metrics
+### 5.3 Cascade → training queue
+
+- [ ] On any escalation, write redacted **CascadeTrainingRecord**:
+  - prompt / context
+  - cpu_output (rejected if escalated further or discarded)
+  - gpu_output (if tried)
+  - frontier_output (chosen when it wins)
+  - final_provider, cascade_path, timestamps
+- [ ] Batch into **next scheduled FT** (priority over random idle telemetry)
+- [ ] After promote: expect GPU→frontier rate and CPU→GPU rate to drop on similar prompts
+
+### 5.4 Ops metrics
 
 - [ ] OpenTelemetry on harness + router + infer + training pipeline
-- [ ] Dashboards: tps, p95, heap, VRAM, escalate rate, **credits/$ by provider**, train job health, forgetting metrics, **% traffic on org-small**
+- [ ] Dashboards: tps, p95, heap, VRAM, cascade histogram, **credits/$ by provider**, train queue depth, **% resolved on CPU**
 
-**Exit criteria:** Load test shows routing p95 &lt; 10 ms; ≤20% escalate from org-small; blended credits **materially below** always-heavy baseline at equal or better eval quality.
+**Exit criteria:** Load test shows routing overhead &lt; 10 ms decision; ≤20% leave CPU; frontier share material below always-frontier baseline; escalated sessions appear in next train job inputs.
 
 ---
 
@@ -686,7 +721,7 @@ Default ladder (cheapest first):
 | RQ7 Hybrid routing / TCO | Phases 5 + 8 |
 | Multi-provider enterprise teachers | Phases 2.1, 4, 5.0 |
 | Capture all sessions → train org models | Phases 2.9, 3A, 3C |
-| Credit ladder (small cheap / heavy expensive) | Phase 5.0–5.2 |
+| CPU → GPU → frontier cascade + train on escalations | Phase 5.0–5.3 |
 | Agentic telemetry corpus | Phase 2.9 + 3C.1 |
 | Gateway PII / poisoning | Phase 3A |
 | FIM hard negatives (Delulu) | Phase 3C.2 |
@@ -738,10 +773,13 @@ Default ladder (cheapest first):
 | **Naive LoRA monthly FT** | O-LoRA / CURLoRA / EWC / FIP; regression gates |
 | **FT before prompting/RAG exhausted** | Policy gate + ≥500 quality pairs + lift metric |
 | **Cognitive debt from generic AI** | Continual alignment + human ECVM-style oversight |
-| **Always default to heavy Claude/OpenAI/Kimi** | Credit ladder: org-small first; heavy = escalate/teacher |
+| **Always default to heavy Claude/OpenAI/Kimi** | Cascade: CPU first; frontier last |
+| **Skip GPU in the ladder** | Always try wasmai-gpu before frontier when available |
+| **Escalate but don’t train on it** | Cascade transcripts → next FT schedule (priority queue) |
 | **Capture only one vendor’s sessions** | Single gateway corpus; all providers tagged and trained |
 | **Train org models but never shift traffic** | Post-promote router re-bias + credit dashboards |
 | **Ignore enterprise ToS / employee notice** | Legal review for training-on-usage per provider contract |
+
 ---
 
 ## Suggested first week (immediate next steps)

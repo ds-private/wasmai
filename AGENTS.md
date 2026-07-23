@@ -11,8 +11,11 @@ Credit-aware coding agent + multi-provider session capture → continual trainin
 1. **Agent harness is native** (Rust preferred). Do **not** put the full tool loop inside the 4 GiB WASM instance.
 2. **WASM = inference only** (`wasmai-infer`): GGUF via WASI-NN **mmap**; heap holds KV/metadata only.
 3. **Every session through the gateway is captured** (all providers), redacted, and eligible for org-model training.
-4. **Credit ladder (cheap first):** wasmai-cpu → wasmai-gpu → mid API → heavy enterprise API.
-5. **Teachers = enterprise APIs** (and open teachers if used). **Students = org GGUF/adapters.**
+4. **Escalation cascade (router):**  
+   **CPU (org-small) → if not good enough → GPU (org-large) → if not good enough → frontier/enterprise APIs.**  
+   Stop at the first tier that passes confidence/quality gates.
+5. **Escalations train the org:** failed CPU/GPU attempts + winning frontier reply are queued for the **next training schedule** (DPO: weak = rejected, frontier = chosen). Goal: fewer escalations next cycle.
+6. **Teachers = enterprise/frontier APIs** (and open teachers if used). **Students = org GGUF/adapters.**
 
 ## Stack
 
@@ -33,7 +36,8 @@ Credit-aware coding agent + multi-provider session capture → continual trainin
 - Env config for infer: `MODEL_PATH`, `N_GPU_LAYERS`, `CONTEXT_SIZE`.
 - No raw secrets/PII in training lake; redaction at gateway.
 - Standard LoRA alone is **not** enough for scheduled continual FT.
-- Prefer org-large over heavy API when escalating (save credits).
+- Prefer GPU before frontier when escalating (save credits).
+- Always persist the cascade transcript for scheduled FT when any escalation occurs.
 
 ## Repo map
 
@@ -72,6 +76,8 @@ Credit-aware coding agent + multi-provider session capture → continual trainin
 
 - Full agent inside WASM  
 - Always default to Opus/GPT/Kimi for simple tasks  
+- Skip GPU and jump CPU → frontier without trying org-large  
+- Escalate without saving the cascade for the next training schedule  
 - Capture only one vendor’s sessions  
 - Train models and never re-bias router toward cheaper tiers  
 - Partial GPU offload (PCIe penalty zone)  

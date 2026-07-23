@@ -33,17 +33,28 @@ User / IDE / CLI
         ↓
 Agent Harness (tools, memory, ReAct loop)
         ↓
-Router + Redaction Gateway
-  credit ladder · all providers · capture 100%
-        ↓
-  Enterprise teachers          Org wasmai (WasmEdge)
-  high credit burn             CPU 3B / GPU 7B–70B Q4
-        └──────── harvest ────────┘
-                    ↓
-         Continual FT → promote GGUF
-                    ↓
-         more traffic on cheap tiers
+Router + Redaction Gateway  (capture every step)
+        │
+        ▼
+   ┌─ wasmai CPU (org-small) ── confidence / quality OK? ──► answer user
+   │            │ not good enough
+   │            ▼
+   ├─ wasmai GPU (org-large) ── confidence / quality OK? ──► answer user
+   │            │ not good enough
+   │            ▼
+   └─ Frontier / enterprise APIs (Claude, OpenAI, Kimi, …) ─► answer user
+                    │
+                    ▼
+         Full conversation (failed CPU/GPU attempts + winning frontier reply)
+         queued for the next training schedule → better org models → fewer escalations
 ```
+
+### Escalation cascade (core product behavior)
+
+1. **CPU first** — org-small WASM model handles the request (cheapest).
+2. **GPU kicks in** — if the router judges the CPU answer not good enough (low confidence, quality gates, complexity), re-run on org-large GPU.
+3. **Frontier / enterprise last** — if GPU is still not good enough, call Claude / OpenAI / Kimi / etc.
+4. **Save for training** — the whole escalated conversation (weaker-tier attempts as rejects, frontier answer as chosen gold) is redacted and stored for the **next scheduled fine-tune**, so org models learn those hard cases and escalate less next cycle.
 
 Full phased plan, invariants, and ship gates: **[TODO.md](./TODO.md)**.  
 Research notes: **[docs/](./docs/)**.  
@@ -59,11 +70,12 @@ Agent project memory: **[AGENTS.md](./AGENTS.md)**.
 - Permissions: Auto / Ask / Plan · hooks · worktree isolation
 - Skills, sub-agents, MCP (post-MVP)
 
-### Providers & credits
+### Router, providers & credits
+- **Cascade:** CPU → GPU → frontier/enterprise (stop at first good-enough answer)
 - Claude, OpenAI, Kimi, and other enterprise models via one abstraction
 - wasmai-cpu / wasmai-gpu as first-class providers
-- Per-turn tokens + credits; budget caps; route reasons logged
-
+- Per-turn tokens + credits; budget caps; `route_reason` logged
+- Escalated sessions (especially frontier rescues) prioritized for next train job
 ### Inference (org models)
 - Rust + Candle / WASI-NN · `wasm32-wasi` · WasmEdge GGML plugin
 - Binary GPU offload (`N_GPU_LAYERS=0` or `99`) · `try_load_gpu` CPU fallback
@@ -121,7 +133,8 @@ Enterprise providers: configure API keys via env / secret store (never commit). 
 - WASM heap ≤ **4.0 GiB** (target peak ≤ 3.8 GiB); GGUF via **mmap**, not guest heap.
 - GPU offload **0 or 99** only (no PCIe partial-offload zone).
 - **No raw sessions** in the training lake without gateway redaction.
-- Router defaults to **cheap**; heavy APIs are escalate / teach, not “always on.”
+- Router cascade: **CPU → GPU → frontier**; stop when good enough; never default to frontier.
+- Escalated conversations are **training gold** for the next schedule (weaker drafts rejected, winner chosen).
 - Capture **all** providers into one org corpus; train **org** models; re-bias traffic after promote.
 
 ---
